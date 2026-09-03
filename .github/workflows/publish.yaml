@@ -1,0 +1,240 @@
+# Publishes @banou/ponyfill when its version changes.
+#
+# THE FILENAME IS PART OF THE TRUST RELATIONSHIP AND MUST NOT CHANGE. npm trusted publishing binds
+# the package to a repository PLUS a workflow filename, and the configuration on npmjs.org names
+# `publish.yaml`. Renaming this file, or the repository, breaks publishing and needs reconfiguring by
+# hand on npmjs.org. The `name:` below is display text only and is safe to edit.
+#
+# No token is stored anywhere. npm exchanges this job's OIDC identity for a short lived credential,
+# which is why `id-token: write` below is not optional and why there is no secret to leak or rotate.
+#
+# Most of the shape here is inherited from horionsoftware/fkn-client's publish-lib.yml, which paid
+# for every one of these lessons in failed runs. The pnpm and workspace parts of it do not apply:
+# this package is plain npm with no workspace protocol to rewrite, so it packs and publishes with one
+# tool. What is kept is the discipline, because none of it was obvious and all of it was measured.
+name: Publish @banou/ponyfill
+
+on:
+  push:
+    branches: [ main ]
+    # a publish is a version change, and the version lives in exactly one file
+    paths:
+      - 'package.json'
+  # for re-running a publish that failed AFTER the version already landed on main, which a push
+  # cannot repeat
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # the OIDC token npm exchanges for short lived publish credentials. Without it the job cannot
+      # authenticate at all, because there is deliberately no token secret anywhere.
+      id-token: write
+      # only to push the release tag
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # NO `registry-url` on purpose. That input writes an .npmrc pinning auth to ${NODE_AUTH_TOKEN},
+      # which is empty under trusted publishing, and turns a working OIDC exchange into an ENEEDAUTH
+      # that reads like a revoked credential. registry.npmjs.org is the default, so nothing is lost.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          # setup-node@v5 caches the package manager BY DEFAULT through this separate input, and the
+          # post-job step it registers fails with `Path Validation Error` whenever there is nothing to
+          # save, which is every run where the version has not moved and the install was skipped. The
+          # JOB then goes red while every step in it reports success. Measured in fkn-client, run
+          # 33210547914.
+          package-manager-cache: false
+
+      # Trusted publishing needs npm 11.5.1 or newer. Pinned rather than assumed: the day the runner
+      # image moves to an older npm, the publish step fails with an auth error that looks like a
+      # revoked credential rather than a stale CLI.
+      - name: Use an npm that supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          echo "npm $(npm --version)"
+
+      # Decided BEFORE anything is built, so an unchanged version costs seconds.
+      #
+      # Compared against the REGISTRY rather than against the previous commit, which makes this
+      # idempotent: a publish that failed halfway is retried correctly and a re-run of a successful
+      # one is a no-op. A git diff reports "changed" on the retry and "unchanged" on the re-run, and
+      # both are wrong.
+      #
+      # FOUR outcomes, not two, because "the registry says 0.0.1" and "the registry did not answer"
+      # are different facts and only one of them is evidence.
+      - name: Decide whether the version moved
+        id: decide
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          NAME=$(node -p "require('./package.json').name")
+          echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+          set +e
+          PUBLISHED=$(cd "${RUNNER_TEMP:-/tmp}" && npm view "$NAME" version 2>/tmp/view.err)
+          CODE=$?
+          set -e
+
+          if [ "$CODE" -eq 0 ] && [ -n "$PUBLISHED" ]; then
+            :
+          elif grep -q 'E404' /tmp/view.err; then
+            PUBLISHED=""
+            echo "::notice::$NAME is not on the registry; this would be its first publish."
+          else
+            echo "::error::could not read $NAME from the registry (exit $CODE). Refusing to guess."
+            cat /tmp/view.err
+            exit 1
+          fi
+
+          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME $LOCAL is already published; nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::publishing $NAME ${PUBLISHED:-none} -> $LOCAL"
+          fi
+
+      - name: Install
+        if: steps.decide.outputs.changed == 'true'
+        run: npm ci
+
+      # This repo has no separate gate, unlike fkn-client where main can only be reached through
+      # verify-and-promote. So the tests run HERE, before anything is uploaded, because an npm version
+      # cannot be republished once it is wrong.
+      - name: Test and typecheck
+        if: steps.decide.outputs.changed == 'true'
+        run: |
+          npm test
+          npm run typecheck
+
+      # `prepack` builds, so the tarball can never be made from a stale or absent build/ directory.
+      # build/ is gitignored, so on a fresh checkout there is none at all and a pack without that hook
+      # would produce a package containing only README.md and package.json: importable, resolvable,
+      # and exporting nothing.
+      - name: Pack
+        id: pack
+        if: steps.decide.outputs.changed == 'true'
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          TGZ=$(ls -t "$RUNNER_TEMP"/*.tgz | head -1)
+          echo "tgz=$TGZ" >> "$GITHUB_OUTPUT"
+          echo "packed $TGZ"
+
+      # Read the TARBALL, never the sources that produced it. This is the only step that observes
+      # what a consumer actually receives.
+      - name: Verify the tarball before it leaves the runner
+        if: steps.decide.outputs.changed == 'true'
+        run: |
+          TGZ="${{ steps.pack.outputs.tgz }}"
+          MANIFEST=$(tar xzOf "$TGZ" package/package.json)
+          NAME=$(printf '%s' "$MANIFEST" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).name")
+          VERSION=$(printf '%s' "$MANIFEST" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          echo "artifact: $NAME@$VERSION"
+
+          if [ "$NAME" != "${{ steps.decide.outputs.name }}" ]; then
+            echo "::error::packed name is $NAME, expected ${{ steps.decide.outputs.name }}"; exit 1
+          fi
+          if [ "$VERSION" != "${{ steps.decide.outputs.local }}" ]; then
+            echo "::error::packed version $VERSION does not match ${{ steps.decide.outputs.local }}"; exit 1
+          fi
+
+          # THE FAILURE THIS EXISTS FOR: build/ is gitignored, so a pack whose prepack hook did not run
+          # ships a package that resolves and exports nothing. Every consumer then gets `undefined` for
+          # every import, with no error anywhere.
+          if ! tar tzf "$TGZ" | grep -q '^package/build/'; then
+            echo "::error::the tarball contains no build output at all"; exit 1
+          fi
+          for want in build/index.js build/index.cjs build/index.d.ts build/storage.js build/storage.cjs build/storage.d.ts; do
+            if ! tar tzf "$TGZ" | grep -q "^package/$want$"; then
+              echo "::error::the tarball is missing $want, which the exports map points at"; exit 1
+            fi
+          done
+
+          # `files` decides the whole payload, and its absence silently falls back to .gitignore,
+          # which would ship src/ and every build config. That shipped once in fkn-client.
+          if tar tzf "$TGZ" | grep -q '^package/src/'; then
+            echo "::error::the tarball contains src/, which means the files field is missing or wrong"
+            tar tzf "$TGZ" | sed 's/^/  /'
+            exit 1
+          fi
+          echo "tarball contents:"
+          tar tzf "$TGZ" | sed 's/^/  /'
+
+      # The strongest check available before the upload: install the tarball into an empty project and
+      # import it the way a consumer would, through the exports map rather than by file path. A build
+      # that produced files is not the same fact as a package that resolves.
+      - name: Install the tarball somewhere else and import it
+        if: steps.decide.outputs.changed == 'true'
+        run: |
+          CONSUMER="$RUNNER_TEMP/consumer"
+          mkdir -p "$CONSUMER" && cd "$CONSUMER"
+          printf '{"name":"c","type":"module","private":true}\n' > package.json
+          npm install "${{ steps.pack.outputs.tgz }}" --no-audit --no-fund
+          node --input-type=module -e "
+            import { correctedUsage, storage, QUOTA_CEILING } from '${{ steps.decide.outputs.name }}'
+            const corrected = correctedUsage({ usage: 1813502, usageDetails: { fileSystem: 752 } }, 1783407077)
+            if (!(corrected > 1783407077)) { console.error('correctedUsage did not correct'); process.exit(1) }
+            if (QUOTA_CEILING.chromium.ceiling !== 'elastic') { console.error('QUOTA_CEILING missing'); process.exit(1) }
+            const e = await storage.estimate()
+            if (e.usage !== 0 || e.quota !== 0) { console.error('estimate should degrade to zeroes with no navigator'); process.exit(1) }
+            console.log('the published tarball imports and behaves')
+          "
+
+      # No credential is passed. npm exchanges this job's OIDC identity for a short lived token
+      # against the trusted publisher configured on npmjs.org for Banou26/ponyfill + publish.yaml.
+      # BOTH HALVES ARE THE TRUST RELATIONSHIP: renaming this file breaks publishing, and so does
+      # renaming the repository.
+      #
+      # Provenance is attested automatically under trusted publishing, so --provenance is not passed.
+      - name: Publish
+        if: steps.decide.outputs.changed == 'true'
+        run: npm publish "${{ steps.pack.outputs.tgz }}" --access public
+
+      # Ask the REGISTRY. Everything above is a claim about what was uploaded; only this observes what
+      # a consumer would actually get.
+      #
+      # Over HTTP rather than `npm view`, and that is the whole point of the step working at all: the
+      # CLI answers from a cache that a lookup made shortly BEFORE the publish leaves holding a
+      # negative, so it keeps reporting the old version, or an empty string, long after the registry is
+      # serving the new one. Measured in fkn-client on 2026-08-29, where this step failed all five
+      # attempts while a plain `npm view` from another machine answered correctly at that same moment.
+      - name: Confirm the registry serves it
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          PKG: ${{ steps.decide.outputs.name }}
+          WANT: ${{ steps.decide.outputs.local }}
+        run: |
+          ENC=$(printf '%s' "$PKG" | sed 's|/|%2f|')
+          CODE=000
+          for i in $(seq 1 20); do
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/$ENC/$WANT" || echo 000)
+            if [ "$CODE" = "200" ]; then
+              echo "::notice::$PKG $WANT is live on npm"
+              exit 0
+            fi
+            echo "registry answered $CODE for $PKG@$WANT, retrying ($i/20)"
+            sleep 15
+          done
+          echo "::error::$PKG $WANT was published but the registry never served it (last status $CODE)"
+          exit 1
+
+      # Tag only after the registry confirms, so a tag can never name a release that is not there.
+      - name: Tag the release
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.decide.outputs.local }}"
+          git tag "$TAG" "${{ github.sha }}"
+          git push origin "$TAG"
