@@ -3,10 +3,20 @@ import { builtinModules } from 'module'
 
 import packageJson from './package.json'
 
+/**
+ * Nothing is bundled that a consumer will resolve for itself.
+ *
+ * `dependencies` is read through a widened view because this package HAS none: TypeScript infers the
+ * manifest's exact shape from the import, so `packageJson.dependencies` is not merely undefined, it
+ * is a property that does not exist, and the `?? {}` cannot save an expression that fails to
+ * compile. The widening keeps the fallback meaningful if one is ever added.
+ */
+const manifest = packageJson as { dependencies?: Record<string, string> }
+
 const externalDeps = [
   ...builtinModules,
   ...builtinModules.map((m) => `node:${m}`),
-  ...Object.keys(packageJson.dependencies ?? {}),
+  ...Object.keys(manifest.dependencies ?? {}),
 ]
 
 export default defineConfig((env) => ({
