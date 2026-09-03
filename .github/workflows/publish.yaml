@@ -174,6 +174,13 @@ jobs:
       # The strongest check available before the upload: install the tarball into an empty project and
       # import it the way a consumer would, through the exports map rather than by file path. A build
       # that produced files is not the same fact as a package that resolves.
+      #
+      # It also pins the SURFACE, which is the constraint that makes this a ponyfill rather than a
+      # utility library: an export that is not a platform name is not a ponyfill of anything. That is
+      # checked here as well as in the unit tests because this is the artifact a consumer receives,
+      # and because this step has already earned its keep once: it failed the 0.0.4 release when the
+      # surface was stripped and this script still imported the removed names, stopping a publish
+      # whose own release check was stale.
       - name: Install the tarball somewhere else and import it
         if: steps.decide.outputs.changed == 'true'
         run: |
@@ -182,13 +189,28 @@ jobs:
           printf '{"name":"c","type":"module","private":true}\n' > package.json
           npm install "${{ steps.pack.outputs.tgz }}" --no-audit --no-fund
           node --input-type=module -e "
-            import { correctedUsage, storage, QUOTA_CEILING } from '${{ steps.decide.outputs.name }}'
-            const corrected = correctedUsage({ usage: 1813502, usageDetails: { fileSystem: 752 } }, 1783407077)
-            if (!(corrected > 1783407077)) { console.error('correctedUsage did not correct'); process.exit(1) }
-            if (QUOTA_CEILING.chromium.ceiling !== 'elastic') { console.error('QUOTA_CEILING missing'); process.exit(1) }
-            const e = await storage.estimate()
-            if (e.usage !== 0 || e.quota !== 0) { console.error('estimate should degrade to zeroes with no navigator'); process.exit(1) }
-            console.log('the published tarball imports and behaves')
+            import * as pkg from '${{ steps.decide.outputs.name }}'
+
+            const surface = Object.keys(pkg).sort().join(',')
+            if (surface !== 'storage') {
+              console.error('the package exports something the platform does not have:', surface)
+              process.exit(1)
+            }
+            const members = Object.keys(pkg.storage).sort().join(',')
+            if (members !== 'estimate,getDirectory,persist,persisted') {
+              console.error('storage does not mirror navigator.storage:', members)
+              process.exit(1)
+            }
+
+            // node has no navigator.storage, so the ponyfill must degrade rather than throw
+            const estimate = await pkg.storage.estimate()
+            if (Object.keys(estimate).length !== 0) {
+              console.error('estimate should be empty with no Storage API, got', JSON.stringify(estimate))
+              process.exit(1)
+            }
+            if (await pkg.storage.persisted() !== false) { console.error('persisted should be false'); process.exit(1) }
+
+            console.log('the published tarball resolves, mirrors navigator.storage, and degrades cleanly')
           "
 
       # No credential is passed. npm exchanges this job's OIDC identity for a short lived token
