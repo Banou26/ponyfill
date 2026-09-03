@@ -71,6 +71,59 @@ Cache is the thing that can be fetched again; a caller that never reclaims becau
 pressure is the failure this replaces. The ceiling still follows the platform DOWNWARD, and is never
 reported below the bytes already held, so `quota - usage` reaches zero and never goes negative.
 
+The ceiling is held per realm and in memory, and it **lets go when the origin's persistence changes**.
+A granted `persist()` moved the reported quota from 12 GB to 3.97 TB on Firefox (measured
+2026-09-01), so the figure learned before that is worse than useless afterwards. The release is keyed
+on the state rather than on the call, because `persist()` only exists on the main thread: a worker
+that latched the old ceiling and could never call it would go on deciding what to delete from a
+number that no longer exists.
+
+### `permissions`
+
+`query()` has four ways of behaving and only one of them is an answer: the engine may have no
+Permissions API, may reject a name it does not implement, may **throw synchronously** for one (which
+a `.catch` on the returned promise never sees), or may answer a real state.
+
+All three non-answers collapse to `'prompt'`. Not `'denied'`, because an engine that cannot be asked
+has not refused anything, and treating silence as refusal costs the person a control that might have
+worked.
+
+### `showOpenFilePicker`, `showDirectoryPicker`, `showSaveFilePicker`
+
+Measured 2026-09-03 across Chromium 149, Firefox 151 and WebKit 26:
+
+| | Chromium | Firefox | WebKit |
+| --- | --- | --- | --- |
+| the three pickers | present | **absent** | **absent** |
+| `FileSystemHandle` and friends as globals | present | present | **absent** |
+| `<input>.webkitdirectory` and its `cancel` event | yes | yes | yes |
+| an object holding its methods as own properties, cloned | `DataCloneError` | `DataCloneError` | `DataCloneError` |
+| the same object with its methods on a prototype | clones, silently | clones, silently | clones, silently |
+| `<input webkitdirectory>` file order, same tree | `a`, `sub/b` | `sub/b`, `a` | `sub/b`, `a` |
+
+**Reading always works, and always answers handles.** Where the platform has a picker it is used and
+its handles come back untouched. Where it does not, an `<input type="file">` is opened and what comes
+back is wrapped in the same shape, so a caller has one call and one return type instead of a
+`FileSystemFileHandle | File` union threaded through everything downstream.
+
+**Writing is refused rather than faked.** `showSaveFilePicker` has no fallback, `showDirectoryPicker`
+refuses `mode: 'readwrite'` where there is no native picker, and a wrapped handle's
+`createWritable()` throws. There is no way to write to a chosen location without the platform's
+picker.
+
+**Refusals happen before the gesture is spent**, and are named `NotAllowedError` so a caller can tell
+them from the `AbortError` the platform throws when the person cancels. A caller has one transient
+activation, and a picker that rejects at call time has already spent part of it.
+
+**A wrapped handle cannot be persisted, and says so loudly.** This is the one difference that cannot
+be absorbed, so what is picked is how it fails. A native handle survives `structuredClone` and comes
+back out of IndexedDB still usable; a wrapper around a `File` cannot, because a snapshot is not an
+entry on a disk. Left as an ordinary object it would clone *successfully* and come back with its
+prototype gone and every method with it, failing after a reload with nothing pointing at the pick. So
+every wrapped handle carries its methods as own properties, which makes the store throw
+`DataCloneError` at the moment of the mistake: one `.catch` where it matters instead of a capability
+probe at every call site.
+
 ## Adding to it
 
 If you hit something that behaves differently between engines, or differently from its own
