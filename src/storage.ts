@@ -176,19 +176,59 @@ const reconcile = (estimate: StorageEstimate, walked: number | null): number | u
  * slightly early. Cache is the thing that can be fetched again; a caller that never reclaims because
  * it never sees pressure is the failure this replaces.
  *
- * In memory, and per page. Persisting it would mean owning storage to describe storage, and a reload
- * re-anchors on a figure the platform stated at that moment, which is the same guarantee.
+ * In memory, and per REALM rather than per page: a worker holds its own. Persisting it would mean
+ * owning storage to describe storage, and a reload re-anchors on a figure the platform stated at
+ * that moment, which is the same guarantee. What a realm cannot be allowed to do is hold a ceiling
+ * that has since moved, and the release below is how it lets go without any realm telling another.
  */
 let narrowest: number | undefined
 
-const ceiling = (reported: number | undefined, usage: number | undefined): number | undefined => {
+/**
+ * Whether the origin was persistent when the ceiling above was latched.
+ *
+ * THE LATCH HAS TO BE ABLE TO LET GO, AND IN A REALM THAT NEVER ASKED. A grant moves the ceiling by
+ * orders of magnitude (measured 2026-09-01 on Firefox: 12 GB to 3.97 TB), so the figure learned
+ * before it is worse than useless afterwards. `persist()` is a MAIN THREAD call, because a worker's
+ * StorageManager has none, so a worker that latched 12 GB would hold it for its whole life while the
+ * page moved on. Anything deciding what to delete from that figure would go on deleting against a
+ * ceiling that no longer exists.
+ *
+ * So the release is keyed on the STATE rather than on the call: every `estimate()` reads
+ * `persisted()` alongside the quota, and a change since the latch drops it. That works in every
+ * realm, including the ones that could not have made the call, and it needs no shared state between
+ * them. `undefined` means the engine would not say, and an engine that will not say has not reported
+ * a change, so the latch stands.
+ */
+let latchedUnder: boolean | undefined
+
+const ceiling = (
+  reported: number | undefined,
+  usage: number | undefined,
+  persistent: boolean | undefined,
+): number | undefined => {
   if (reported === undefined) return undefined
+  // the state moved, so the ceiling that was latched under it moved with it
+  if (persistent !== latchedUnder) narrowest = undefined
+  latchedUnder = persistent
   narrowest = narrowest === undefined ? reported : Math.min(narrowest, reported)
   // never below what is already stored, or `quota - usage` goes negative and every caller's
   // arithmetic goes with it. At worst the headroom reads zero, which is the honest answer for an
   // origin holding more than the ceiling it was first offered.
   return Math.max(narrowest, usage ?? 0)
 }
+
+/**
+ * Whether this origin is persistent, or undefined where the engine has no way to be asked.
+ *
+ * A REJECTION IS NOT A CHANGE OF STATE, so it answers whatever the ceiling was latched under and the
+ * latch is left alone. Treating a failed read as a third value would make an engine that fails this
+ * call intermittently drop the ceiling every other estimate, which is the pick quietly turning
+ * itself off on exactly the engines least able to spare it.
+ */
+const persistence = async (native: StorageManager): Promise<boolean | undefined> =>
+  native.persisted
+    ? native.persisted().then((value) => value === true).catch(() => latchedUnder)
+    : undefined
 
 export const storage = {
   /**
@@ -202,13 +242,16 @@ export const storage = {
     const native = globalThis.navigator?.storage
     if (!native?.estimate) return {}
     const estimate = (await native.estimate()) as StorageEstimate
-    const walked = native.getDirectory
-      ? await native.getDirectory()
-        .then((directory) => walkBytes(directory as unknown as WalkableDirectory))
-        .catch(() => null)
-      : null
+    const [walked, persistent] = await Promise.all([
+      native.getDirectory
+        ? native.getDirectory()
+          .then((directory) => walkBytes(directory as unknown as WalkableDirectory))
+          .catch(() => null)
+        : null,
+      persistence(native),
+    ])
     const usage = reconcile(estimate, walked)
-    return { ...estimate, usage, quota: ceiling(estimate.quota, usage) }
+    return { ...estimate, usage, quota: ceiling(estimate.quota, usage, persistent) }
   },
 
   /**
@@ -223,12 +266,16 @@ export const storage = {
    * left to do. So this resolves `persisted()`, falling back to the call's own answer only where the
    * platform will not state the state.
    *
-   * SECOND, the ceiling. A granted persist can move the quota by orders of magnitude: measured
-   * 2026-09-01 on Firefox, granting the "Store data in persistent storage" doorhanger moved the
-   * reported quota from 12 GB to 3.97 TB on an 8.03 TB device, about 330 times. `estimate()` latches
-   * the narrowest quota it has seen, which is right while nothing changes the ceiling and wrong the
-   * moment something does, so a successful grant forgets it. The next `estimate()` re-anchors on
-   * whatever the platform now says.
+   * SECOND, the ceiling, which this call does NOT release and deliberately so. A granted persist can
+   * move the quota by orders of magnitude: measured 2026-09-01 on Firefox, granting the "Store data
+   * in persistent storage" doorhanger moved the reported quota from 12 GB to 3.97 TB on an 8.03 TB
+   * device, about 330 times. `estimate()` latches the narrowest quota it has seen, which is right
+   * while nothing changes the ceiling and wrong the moment something does.
+   *
+   * Releasing it HERE would only release it in the realm that made the call, and this call can only
+   * be made from the main thread. So the release lives in `estimate()`, keyed on the persistence
+   * state rather than on the call, and every realm picks the change up on its next read. See
+   * `latchedUnder`.
    *
    * Chromium, measured 2026-08-30 on Chrome 151, refuses this on every attempt with no prompt shown
    * at any point, and the quota stays flat. That is not a failure to handle: it is the engine
@@ -238,11 +285,10 @@ export const storage = {
     const native = globalThis.navigator?.storage
     if (!native?.persist) return false
     const answered = await native.persist().catch(() => false)
-    const state = await native.persisted?.().catch(() => null) ?? null
-    const persisted = state ?? answered
-    // the ceiling this origin was offered is not the ceiling it has now
-    if (persisted) narrowest = undefined
-    return persisted
+    const state = await persistence(native) ?? null
+    // the ceiling is released by `estimate()` comparing this state against the one it latched under,
+    // rather than here, so a realm that cannot make this call is not stuck with a stale figure
+    return state ?? answered
   },
 
   persisted: (): Promise<boolean> =>

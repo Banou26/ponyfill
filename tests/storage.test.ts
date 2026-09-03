@@ -179,6 +179,52 @@ describe('quota is a ceiling, so it does not rise as the origin fills', () => {
     expect(quota! - usage!, 'the honest answer for an origin at its ceiling is zero, never negative').toBe(0)
   })
 
+  /**
+   * THE REALM THAT CANNOT ASK, which is the case the release rule exists for.
+   *
+   * `persist()` is a main thread call: a worker's StorageManager has none, and ripple's worker says
+   * so where it reads this. So a worker latches the pre grant ceiling and, if the release were keyed
+   * on the CALL, would hold it for its whole life while the page moved on. What that costs is not a
+   * stale display: the worker decides what to DELETE from that figure, so it would go on evicting
+   * torrents to stay under a ceiling that no longer exists.
+   *
+   * A fresh module is a second realm's copy of the same code, which is exactly what a worker has.
+   */
+  it('follows a grant made in another realm, having never called persist itself', async () => {
+    const worker = await fresh()
+    // no `persist` in the stub at all, because a worker's StorageManager does not have one
+    stub({ persisted: async () => false, estimate: async () => ({ usage: 0, quota: 12_000_000_000 }) })
+    expect((await worker.estimate()).quota).toBe(12_000_000_000)
+
+    // the page raised the doorhanger and somebody said yes. All this realm can observe is the state.
+    stub({ persisted: async () => true, estimate: async () => ({ usage: 0, quota: 3_970_000_000_000 }) })
+    expect(
+      (await worker.estimate()).quota,
+      'a realm that cannot ask must still see the ceiling move, or it evicts against a dead figure',
+    ).toBe(3_970_000_000_000)
+  })
+
+  /** And the mirror: an engine that will not answer has reported no change, so the latch stands. */
+  it('holds the ceiling where the engine has no persisted() to compare against', async () => {
+    const storage = await fresh()
+    stub({ estimate: async () => ({ usage: 0, quota: 10_000_000_000 }) })
+    await storage.estimate()
+    stub({ estimate: async () => ({ usage: 0, quota: 99_000_000_000 }) })
+    expect((await storage.estimate()).quota).toBe(10_000_000_000)
+  })
+
+  /** A read that failed is not a state that changed, or a flaky engine turns the pick off. */
+  it('holds the ceiling where persisted() rejects rather than answering', async () => {
+    const storage = await fresh()
+    stub({ persisted: async () => false, estimate: async () => ({ usage: 0, quota: 10_000_000_000 }) })
+    await storage.estimate()
+    stub({
+      persisted: async () => { throw new Error('nope') },
+      estimate: async () => ({ usage: 0, quota: 99_000_000_000 }),
+    })
+    expect((await storage.estimate()).quota).toBe(10_000_000_000)
+  })
+
   it('says nothing about a quota the platform did not state', async () => {
     const storage = await fresh()
     stub({ estimate: async () => ({ usage: 5 }) })
@@ -304,7 +350,9 @@ describe('persist reports the state it leaves behind', () => {
   /** THE CEILING. A grant can move the quota by orders of magnitude, so the latch has to let go. */
   it('forgets the latched ceiling when the grant lands, so a raised quota is reported', async () => {
     const storage = await fresh()
-    stub({ estimate: async () => ({ usage: 0, quota: 12_000_000_000 }) })
+    // `persisted` is stubbed from the first read because a browser does not grow one mid session,
+    // and the latch is released by that state CHANGING rather than by the call that changed it
+    stub({ persisted: async () => false, estimate: async () => ({ usage: 0, quota: 12_000_000_000 }) })
     expect((await storage.estimate()).quota).toBe(12_000_000_000)
 
     stub({
@@ -320,7 +368,7 @@ describe('persist reports the state it leaves behind', () => {
   /** A refused grant changed nothing, so the ceiling already learned still stands. */
   it('keeps the ceiling when the grant is refused', async () => {
     const storage = await fresh()
-    stub({ estimate: async () => ({ usage: 0, quota: 10_737_418_240 }) })
+    stub({ persisted: async () => false, estimate: async () => ({ usage: 0, quota: 10_737_418_240 }) })
     await storage.estimate()
     stub({
       persist: async () => false,
