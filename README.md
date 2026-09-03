@@ -58,10 +58,10 @@ That is not hypothetical. It is why four of ripple's storage eviction tests sat 
 they filled the origin to provoke that condition, and 3.5 GB of padding left the free figure
 identical to the byte.
 
-This package does **not** invent a normalised quota, because there is no honest number to invent: on
-Chromium you really can write 10 more GiB, so the native answer is true. It names the two shapes
-(`QUOTA_CEILING`) and can measure which one an origin has (`measureQuotaCeiling`), by writing a
-sparse probe and watching, because at rest the two are indistinguishable.
+This package does **not** invent a normalised quota, and does not add API for the difference either:
+on Chromium you really can write 10 more GiB, so the native answer is true, and there is no platform
+name for "which shape is this". It is written down here and in the source because the two are
+indistinguishable at rest, which is how the difference went unnoticed for months.
 
 ## Adding to it
 
