@@ -175,12 +175,17 @@ jobs:
       # import it the way a consumer would, through the exports map rather than by file path. A build
       # that produced files is not the same fact as a package that resolves.
       #
-      # It also pins the SURFACE, which is the constraint that makes this a ponyfill rather than a
-      # utility library: an export that is not a platform name is not a ponyfill of anything. That is
-      # checked here as well as in the unit tests because this is the artifact a consumer receives,
-      # and because this step has already earned its keep once: it failed the 0.0.4 release when the
-      # surface was stripped and this script still imported the removed names, stopping a publish
-      # whose own release check was stale.
+      # WHAT IT DOES NOT CHECK, on purpose. It used to assert the exact list of top level exports, and
+      # that went stale twice in one day: once when the surface was stripped to platform names, once
+      # when three more were added. Both times it failed a release for a reason that was about this
+      # file rather than about the package. The rule it was trying to enforce, that every export is a
+      # platform name, belongs in the unit tests, where it lives next to the change that would break
+      # it and moves in the same commit.
+      #
+      # What stays here is what the tests cannot see: that the ARTIFACT resolves, that nothing was
+      # dropped between the source and the tarball, and that it degrades where the platform is absent.
+      # `storage`'s own members are checked because those mirror `navigator.storage` rather than any
+      # choice of ours, so that list cannot drift without the platform drifting.
       - name: Install the tarball somewhere else and import it
         if: steps.decide.outputs.changed == 'true'
         run: |
@@ -188,29 +193,54 @@ jobs:
           mkdir -p "$CONSUMER" && cd "$CONSUMER"
           printf '{"name":"c","type":"module","private":true}\n' > package.json
           npm install "${{ steps.pack.outputs.tgz }}" --no-audit --no-fund
-          node --input-type=module -e "
+
+          # what the SOURCE says it exports, so the comparison below cannot go stale
+          EXPECTED=$(cd "$GITHUB_WORKSPACE" && node -e "
+            const src = require('fs').readFileSync('src/index.ts', 'utf8')
+            const names = [...src.matchAll(/^export \{([^}]*)\} from/gm)]
+              .flatMap((m) => m[1].split(','))
+              .map((n) => n.trim())
+              .filter(Boolean)
+            console.log([...new Set(names)].sort().join(','))
+          ")
+          echo "src/index.ts exports: $EXPECTED"
+
+          EXPECTED="$EXPECTED" node --input-type=module -e "
             import * as pkg from '${{ steps.decide.outputs.name }}'
 
-            const surface = Object.keys(pkg).sort().join(',')
-            if (surface !== 'storage') {
-              console.error('the package exports something the platform does not have:', surface)
+            const got = Object.keys(pkg).sort().join(',')
+            if (got !== process.env.EXPECTED) {
+              console.error('the tarball does not expose what the source exports')
+              console.error('  source :', process.env.EXPECTED)
+              console.error('  tarball:', got)
               process.exit(1)
             }
+            for (const [name, value] of Object.entries(pkg)) {
+              if (value === undefined || value === null) {
+                console.error('export', name, 'resolved to', value, 'which means the build dropped it')
+                process.exit(1)
+              }
+            }
+
+            // mirrors navigator.storage, so this list moves only if the platform does
             const members = Object.keys(pkg.storage).sort().join(',')
             if (members !== 'estimate,getDirectory,persist,persisted') {
               console.error('storage does not mirror navigator.storage:', members)
               process.exit(1)
             }
 
-            // node has no navigator.storage, so the ponyfill must degrade rather than throw
+            // node has no navigator, so everything must degrade rather than throw
             const estimate = await pkg.storage.estimate()
             if (Object.keys(estimate).length !== 0) {
               console.error('estimate should be empty with no Storage API, got', JSON.stringify(estimate))
               process.exit(1)
             }
             if (await pkg.storage.persisted() !== false) { console.error('persisted should be false'); process.exit(1) }
+            if ((await pkg.permissions.query({ name: 'persistent-storage' })).state !== 'prompt') {
+              console.error('permissions.query should answer prompt where it cannot ask'); process.exit(1)
+            }
 
-            console.log('the published tarball resolves, mirrors navigator.storage, and degrades cleanly')
+            console.log('the published tarball exposes exactly what the source does, and degrades cleanly')
           "
 
       # No credential is passed. npm exchanges this job's OIDC identity for a short lived token
