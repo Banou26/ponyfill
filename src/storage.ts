@@ -103,28 +103,56 @@ const isDirectory = (handle: WalkableDirectory | WalkableFile): handle is Walkab
   typeof (handle as WalkableDirectory).values === 'function'
 
 /**
- * Every byte under a directory, measured rather than asked for.
+ * Never walk forever: a cycle is impossible in OPFS, but a pathological tree is not worth the tick.
  *
- * Recursive, and it counts a file's REPORTED SIZE, which for OPFS is the file's extent rather than
- * how much of it has been written. That is the same accounting the quota system uses, which is the
- * whole point: a one byte write a gigabyte into a file is charged a gigabyte, and a measurement that
- * disagreed with the charge would be no more useful than the figure it replaces.
- *
- * An unreadable entry is SKIPPED rather than fatal. A file the engine currently holds an exclusive
- * sync access handle for cannot be opened by anyone else, and a walk that threw on the first of
- * those would return nothing for exactly the origins that hold the most.
+ * These are bounds, not correctness: hitting either returns what was counted so far rather than
+ * failing, which keeps the answer a floor in the same direction as everything else here.
  */
-export const measureDirectoryBytes = async (directory: WalkableDirectory): Promise<number> => {
+export const MAX_DEPTH = 8
+export const MAX_ENTRIES = 20_000
+
+/**
+ * Every byte under a directory, measured rather than asked for, or `null` when the walk could not
+ * be done at all.
+ *
+ * The null is a distinct third answer and callers depend on it: "the origin holds nothing" and "the
+ * file system was unreachable" lead to opposite decisions, and collapsing them to 0 would have
+ * {@link correctedUsage} report an empty origin for one that simply could not be read.
+ *
+ * Counts a file's REPORTED SIZE, which for OPFS is its extent rather than how much of it has been
+ * written. That is the same accounting the quota system uses, which is the point: a one byte write a
+ * gigabyte into a file is charged a gigabyte, and a measurement disagreeing with the charge would be
+ * no more useful than the figure it replaces.
+ *
+ * An unreadable ENTRY is skipped rather than fatal. A file the engine currently holds an exclusive
+ * sync access handle for cannot be opened by anyone else, and `getFile()` on it throws rather than
+ * waiting, so a walk that gave up on the first of those would return nothing for exactly the origins
+ * holding the most. The answer is therefore a floor: short by the files open right now, never long.
+ */
+export const measureDirectoryBytes = async (
+  directory: WalkableDirectory,
+  { maxDepth = MAX_DEPTH, maxEntries = MAX_ENTRIES }: { maxDepth?: number, maxEntries?: number } = {},
+): Promise<number | null> => {
   let total = 0
-  const visit = async (handle: WalkableDirectory): Promise<void> => {
+  let seen = 0
+  const visit = async (handle: WalkableDirectory, depth: number): Promise<void> => {
+    if (depth > maxDepth) return
     for await (const child of handle.values()) {
-      if (isDirectory(child)) { await visit(child); continue }
+      if (++seen > maxEntries) return
+      if (isDirectory(child)) { await visit(child, depth + 1); continue }
+      // locked by a live sync access handle, or removed between listing and reading: both are
+      // ordinary, and both mean this file cannot be counted rather than that the walk failed
       const file = await child.getFile().catch(() => null)
       if (file) total += file.size
     }
   }
-  await visit(directory)
-  return total
+  try {
+    await visit(directory, 0)
+    return total
+  } catch {
+    // the whole file system was unreachable, which is a different thing from a file being busy
+    return null
+  }
 }
 
 /**

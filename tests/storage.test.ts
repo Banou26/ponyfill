@@ -25,8 +25,8 @@ const ON_DISK = 1_783_407_077
 
 type FakeHandle = { kind: 'file' | 'directory' }
 
-const file = (size: number): FakeHandle =>
-  ({ kind: 'file', getFile: async () => ({ size }) } as FakeHandle)
+const file = (size: number, name = 'f'): FakeHandle =>
+  ({ kind: 'file', name, getFile: async () => ({ size }) } as FakeHandle)
 
 const dir = (children: FakeHandle[]): FakeHandle =>
   ({ kind: 'directory', values: async function * () { for (const child of children) yield child } } as FakeHandle)
@@ -58,6 +58,41 @@ describe('measuring what is actually on the origin', () => {
   it('skips an entry it cannot open instead of abandoning the walk', async () => {
     const locked = { kind: 'file', getFile: async () => { throw new Error('NoModificationAllowedError') } } as FakeHandle
     expect(await measureDirectoryBytes(dir([file(500), locked, file(300)]) as never)).toBe(800)
+  })
+
+  /**
+   * NULL is a third answer and callers depend on it.
+   *
+   * "the origin holds nothing" and "the file system could not be read" lead to opposite decisions:
+   * the first says there is room, the second says nothing at all. Collapsing them to 0 would have
+   * `correctedUsage` report an empty origin for one that simply could not be enumerated, which is
+   * the under-report this whole module exists to defend against, arrived at from the other side.
+   */
+  it('answers null when the whole walk fails, which is not the same as zero', async () => {
+    const unreadable = { kind: 'directory', values: () => { throw new Error('nope') } } as unknown as FakeHandle
+    expect(await measureDirectoryBytes(unreadable as never)).toBeNull()
+    expect(await measureDirectoryBytes(dir([]) as never), 'an empty origin still answers zero').toBe(0)
+  })
+
+  /**
+   * The two bounds, which are about not hanging rather than about being right.
+   *
+   * A cycle is impossible in OPFS, but a pathological tree is not, and neither is a directory with
+   * a hundred thousand entries. Hitting either bound returns what was counted so far rather than
+   * failing, so the answer stays a floor in the same direction as everything else here.
+   */
+  it('stops descending past the depth bound', async () => {
+    const deep = (levels: number): FakeHandle =>
+      levels === 0 ? dir([file(1_000)]) : dir([file(1), deep(levels - 1)])
+    // every level contributes 1 byte, plus 1000 at the bottom if it is ever reached
+    expect(await measureDirectoryBytes(deep(3) as never, { maxDepth: 8 })).toBe(1_003)
+    expect(await measureDirectoryBytes(deep(20) as never, { maxDepth: 2 }), 'the floor stops early').toBe(3)
+  })
+
+  it('stops counting past the entry bound', async () => {
+    const many = dir(Array.from({ length: 50 }, (_, i) => file(10, `f${i}`)))
+    expect(await measureDirectoryBytes(many as never, { maxEntries: 5 })).toBe(50)
+    expect(await measureDirectoryBytes(many as never), 'unbounded by default reaches them all').toBe(500)
   })
 })
 
