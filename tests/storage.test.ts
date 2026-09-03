@@ -56,7 +56,7 @@ afterEach(() => { vi.unstubAllGlobals() })
 describe('the public surface is the platform surface', () => {
   it('exports nothing the platform does not have', async () => {
     const storage = await fresh()
-    expect(Object.keys(pkg).sort()).toEqual(['permissions', 'showSaveFilePicker', 'storage'])
+    expect(Object.keys(pkg).sort()).toEqual(['permissions', 'showDirectoryPicker', 'showOpenFilePicker', 'showSaveFilePicker', 'storage'])
     expect(Object.keys(storage).sort()).toEqual(['estimate', 'getDirectory', 'persist', 'persisted'])
   })
 

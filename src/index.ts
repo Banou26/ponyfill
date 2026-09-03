@@ -35,7 +35,7 @@
 
 export { storage } from './storage'
 export { permissions } from './permissions'
-export { showSaveFilePicker } from './file-system'
+export { showDirectoryPicker, showOpenFilePicker, showSaveFilePicker } from './file-system'
 
 export type { StorageEstimate } from './storage'
 export type { PermissionStatus } from './permissions'
