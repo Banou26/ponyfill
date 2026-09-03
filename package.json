@@ -1,0 +1,54 @@
+{
+  "name": "@banou/ponyfill",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "build/index.cjs",
+  "module": "build/index.js",
+  "types": "build/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./build/index.d.ts",
+      "import": "./build/index.js",
+      "require": "./build/index.cjs"
+    },
+    "./storage": {
+      "types": "./build/storage.d.ts",
+      "import": "./build/storage.js",
+      "require": "./build/storage.cjs"
+    }
+  },
+  "scripts": {
+    "dev": "vp build --mode development --watch",
+    "build": "vp build && tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vp test run"
+  },
+  "description": "Ponyfills for the places browsers disagree, with the measurement behind each one. Imports only, never a global.",
+  "devDependencies": {
+    "@types/node": "^25.9.5",
+    "typescript": "^5.9.2",
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.3.0",
+    "vite-plus": "0.3.0",
+    "vitest": "4.1.11"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Banou26/ponyfill.git"
+  },
+  "files": [
+    "build",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ponyfill",
+    "browser",
+    "storage",
+    "opfs",
+    "quota",
+    "compatibility"
+  ],
+  "sideEffects": false
+}
