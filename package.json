@@ -20,6 +20,7 @@
   "scripts": {
     "dev": "vp build --mode development --watch",
     "build": "vp build && tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vp test run"
   },
