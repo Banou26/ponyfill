@@ -15,6 +15,16 @@
       "types": "./build/storage.d.ts",
       "import": "./build/storage.js",
       "require": "./build/storage.cjs"
+    },
+    "./permissions": {
+      "types": "./build/permissions.d.ts",
+      "import": "./build/permissions.js",
+      "require": "./build/permissions.cjs"
+    },
+    "./file-system": {
+      "types": "./build/file-system.d.ts",
+      "import": "./build/file-system.js",
+      "require": "./build/file-system.cjs"
     }
   },
   "scripts": {

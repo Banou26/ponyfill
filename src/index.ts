@@ -13,8 +13,12 @@
  * anything: it is a utility library wearing the word. So the surface here is exactly the platform's
  * surface, and a helper only becomes public if the platform has one by that name.
  *
- * Everything else lives behind it. The walk that corrects `estimate().usage`, the bounds on that
- * walk, and the reconciliation between the measured and reported figures are all internal, because
+ * WHERE ENGINES DIVERGE, ONE BEHAVIOUR IS PICKED and made consistent, so application code never
+ * branches. That is the point of the package rather than a liberty it takes. Each pick is argued
+ * where it lives, and each says what it gives up.
+ *
+ * Everything else stays behind the surface. The walk that corrects `estimate().usage`, the bounds on
+ * that walk, and the reconciliation between measured and reported figures are all internal, because
  * `navigator.storage` has no such members and neither should this.
  *
  * ## What belongs in here
@@ -25,9 +29,13 @@
  * next person is not made to repeat it.
  *
  * Every module here states what was measured, on what, and when. A workaround with no measurement
- * behind it is a guess that outlives the bug it was written for.
+ * behind it is a guess that outlives the bug it was written for, and where a measurement is missing
+ * the module says so rather than implying one.
  */
 
 export { storage } from './storage'
+export { permissions } from './permissions'
+export { showSaveFilePicker } from './file-system'
 
 export type { StorageEstimate } from './storage'
+export type { PermissionStatus } from './permissions'

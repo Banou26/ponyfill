@@ -37,7 +37,7 @@ export default defineConfig((env) => ({
     minify: false,
     sourcemap: false,
     lib: {
-      entry: { index: 'src/index.ts', storage: 'src/storage.ts' },
+      entry: { index: 'src/index.ts', storage: 'src/storage.ts', permissions: 'src/permissions.ts', 'file-system': 'src/file-system.ts' },
       formats: ['es', 'cjs'],
     },
     rollupOptions: {

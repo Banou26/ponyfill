@@ -56,7 +56,7 @@ afterEach(() => { vi.unstubAllGlobals() })
 describe('the public surface is the platform surface', () => {
   it('exports nothing the platform does not have', async () => {
     const storage = await fresh()
-    expect(Object.keys(pkg).sort()).toEqual(['storage'])
+    expect(Object.keys(pkg).sort()).toEqual(['permissions', 'showSaveFilePicker', 'storage'])
     expect(Object.keys(storage).sort()).toEqual(['estimate', 'getDirectory', 'persist', 'persisted'])
   })
 
@@ -253,12 +253,81 @@ describe('quota is a ceiling, so it does not rise as the origin fills', () => {
     await expect(storage.getDirectory()).rejects.toThrow(/origin private file system/)
   })
 
-  it('passes persist, persisted and getDirectory straight through', async () => {
+  it('passes persisted and getDirectory straight through', async () => {
     const storage = await fresh()
     const root = dir([])
-    stub({ persist: async () => true, persisted: async () => true, getDirectory: async () => root })
-    expect(await storage.persist()).toBe(true)
+    stub({ persisted: async () => true, getDirectory: async () => root })
     expect(await storage.persisted()).toBe(true)
     expect(await storage.getDirectory()).toBe(root)
+  })
+})
+
+/**
+ * `persist()` resolves what the ORIGIN IS, not what the call said it did.
+ *
+ * Different questions, and only the second decides anything: whether the origin can still be
+ * evicted. A call can resolve false where the origin is already persistent, and an app reading the
+ * call's own answer then offers a button with nothing left to do.
+ *
+ * The second half is the ceiling. Measured 2026-09-01 on Firefox: granting the doorhanger moved the
+ * reported quota from 12 GB to 3.97 TB on an 8.03 TB device, about 330 times. `estimate()` latches
+ * the narrowest quota it has seen, which is right until something moves the ceiling, so a grant has
+ * to forget it or the app reports the old one forever.
+ */
+describe('persist reports the state it leaves behind', () => {
+  it('resolves what persisted() says, not what persist() claimed', async () => {
+    const storage = await fresh()
+    stub({ persist: async () => false, persisted: async () => true })
+    expect(await storage.persist(), 'the origin IS persistent, whatever the call answered').toBe(true)
+  })
+
+  it('falls back to the call when the platform will not state the state', async () => {
+    const storage = await fresh()
+    stub({ persist: async () => true })
+    expect(await storage.persist()).toBe(true)
+  })
+
+  it('is false where the engine refuses, which Chromium does on every attempt', async () => {
+    const storage = await fresh()
+    stub({ persist: async () => false, persisted: async () => false })
+    expect(await storage.persist()).toBe(false)
+  })
+
+  it('never throws, however the platform fails', async () => {
+    const storage = await fresh()
+    stub({ persist: async () => { throw new Error('nope') }, persisted: async () => { throw new Error('nope') } })
+    await expect(storage.persist()).resolves.toBe(false)
+    vi.stubGlobal('navigator', {})
+    expect(await (await fresh()).persist()).toBe(false)
+  })
+
+  /** THE CEILING. A grant can move the quota by orders of magnitude, so the latch has to let go. */
+  it('forgets the latched ceiling when the grant lands, so a raised quota is reported', async () => {
+    const storage = await fresh()
+    stub({ estimate: async () => ({ usage: 0, quota: 12_000_000_000 }) })
+    expect((await storage.estimate()).quota).toBe(12_000_000_000)
+
+    stub({
+      persist: async () => true,
+      persisted: async () => true,
+      estimate: async () => ({ usage: 0, quota: 3_970_000_000_000 }),
+    })
+    expect(await storage.persist()).toBe(true)
+    expect((await storage.estimate()).quota, 'the ceiling moved, so the latch must not hold the old one')
+      .toBe(3_970_000_000_000)
+  })
+
+  /** A refused grant changed nothing, so the ceiling already learned still stands. */
+  it('keeps the ceiling when the grant is refused', async () => {
+    const storage = await fresh()
+    stub({ estimate: async () => ({ usage: 0, quota: 10_737_418_240 }) })
+    await storage.estimate()
+    stub({
+      persist: async () => false,
+      persisted: async () => false,
+      estimate: async () => ({ usage: 0, quota: 99_000_000_000 }),
+    })
+    expect(await storage.persist()).toBe(false)
+    expect((await storage.estimate()).quota).toBe(10_737_418_240)
   })
 })

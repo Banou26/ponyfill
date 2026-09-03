@@ -211,8 +211,39 @@ export const storage = {
     return { ...estimate, usage, quota: ceiling(estimate.quota, usage) }
   },
 
-  persist: (): Promise<boolean> =>
-    globalThis.navigator?.storage?.persist?.() ?? Promise.resolve(false),
+  /**
+   * Same name and signature, resolving what the origin IS rather than what the call said it did.
+   *
+   * TWO PICKS, both inside one call.
+   *
+   * FIRST, the answer. `persist()` resolves its own claim, and `persisted()` resolves the state the
+   * app then lives in. Those are different questions and only the second decides anything: whether
+   * the origin can still be evicted. A call can resolve false on an engine where the origin is
+   * already persistent, and an app reading the first answer then offers a button that has nothing
+   * left to do. So this resolves `persisted()`, falling back to the call's own answer only where the
+   * platform will not state the state.
+   *
+   * SECOND, the ceiling. A granted persist can move the quota by orders of magnitude: measured
+   * 2026-09-01 on Firefox, granting the "Store data in persistent storage" doorhanger moved the
+   * reported quota from 12 GB to 3.97 TB on an 8.03 TB device, about 330 times. `estimate()` latches
+   * the narrowest quota it has seen, which is right while nothing changes the ceiling and wrong the
+   * moment something does, so a successful grant forgets it. The next `estimate()` re-anchors on
+   * whatever the platform now says.
+   *
+   * Chromium, measured 2026-08-30 on Chrome 151, refuses this on every attempt with no prompt shown
+   * at any point, and the quota stays flat. That is not a failure to handle: it is the engine
+   * answering, and `persisted()` reports the same false afterwards.
+   */
+  persist: async (): Promise<boolean> => {
+    const native = globalThis.navigator?.storage
+    if (!native?.persist) return false
+    const answered = await native.persist().catch(() => false)
+    const state = await native.persisted?.().catch(() => null) ?? null
+    const persisted = state ?? answered
+    // the ceiling this origin was offered is not the ceiling it has now
+    if (persisted) narrowest = undefined
+    return persisted
+  },
 
   persisted: (): Promise<boolean> =>
     globalThis.navigator?.storage?.persisted?.() ?? Promise.resolve(false),
