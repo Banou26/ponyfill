@@ -124,6 +124,21 @@ every wrapped handle carries its methods as own properties, which makes the stor
 `DataCloneError` at the moment of the mistake: one `.catch` where it matters instead of a capability
 probe at every call site.
 
+**That applies to `postMessage` too, which is the part that surprises people.** Structured clone is
+also how a message reaches a worker, so a wrapped handle cannot cross that boundary either. Resolve
+it to the `File` behind it first:
+
+```ts
+const handle = (await showOpenFilePicker())[0]
+const canBeReopened = (() => { try { structuredClone(handle); return true } catch { return false } })()
+worker.postMessage({ file: canBeReopened ? handle : await handle.getFile() })
+```
+
+That `try` is also the honest way to ask whether a pick survives a reload, with no new API and no
+user agent sniffing: it is the same operation an IndexedDB `put` performs. Found the hard way in
+ripple, where posting the wrapper published a torrent that then never reached one per cent, with
+nothing reporting a fault.
+
 ## Adding to it
 
 If you hit something that behaves differently between engines, or differently from its own
