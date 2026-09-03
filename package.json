@@ -25,6 +25,7 @@
     "test": "vp test run"
   },
   "description": "Ponyfills for the places browsers disagree, with the measurement behind each one. Imports only, never a global.",
+  "license": "MIT",
   "devDependencies": {
     "@types/node": "^25.9.5",
     "typescript": "^5.9.2",
@@ -38,7 +39,8 @@
   },
   "files": [
     "build",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
