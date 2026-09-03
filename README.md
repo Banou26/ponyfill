@@ -58,10 +58,18 @@ That is not hypothetical. It is why four of ripple's storage eviction tests sat 
 they filled the origin to provoke that condition, and 3.5 GB of padding left the free figure
 identical to the byte.
 
-This package does **not** invent a normalised quota, and does not add API for the difference either:
-on Chromium you really can write 10 more GiB, so the native answer is true, and there is no platform
-name for "which shape is this". It is written down here and in the source because the two are
-indistinguishable at rest, which is how the difference went unnoticed for months.
+**The behaviour picked is Firefox's: a ceiling does not rise because you put something under it.**
+`quota` is reported as the lowest the platform has stated for this origin, which needs no probe and
+no user agent sniffing, and invents nothing: the platform really did say the origin could hold that
+much. Two ordinary things are broken by the rising version, and both were seen in ripple:
+`usage / quota` as a gauge never fills, and `quota - usage < floor` never fires, so nothing can
+detect pressure at all.
+
+The cost is deliberate and in the safe direction. On Chromium, once bytes are written the reported
+headroom is smaller than what could really be written, so a caller reclaims cache slightly early.
+Cache is the thing that can be fetched again; a caller that never reclaims because it never sees
+pressure is the failure this replaces. The ceiling still follows the platform DOWNWARD, and is never
+reported below the bytes already held, so `quota - usage` reaches zero and never goes negative.
 
 ## Adding to it
 

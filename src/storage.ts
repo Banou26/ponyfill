@@ -151,6 +151,45 @@ const reconcile = (estimate: StorageEstimate, walked: number | null): number | u
   return Math.max(reported, walked)
 }
 
+/**
+ * The narrowest quota this origin has reported, which is the one that gets reported back.
+ *
+ * THE DIVERGENCE, AND THE PICK. `quota - usage` already means the same on both engines: bytes you
+ * can still write. What diverges is `quota` as a TOTAL, and Chromium never states one. It states
+ * `usage + headroom`, recomputed on every read, so the number grows as you fill the origin: measured
+ * 10.737 GB rising to 12.353 GB across 1.615 GB written. Firefox states a real total and holds it.
+ *
+ * Two things a caller does with `quota` are broken by the growing version and neither is exotic:
+ *
+ *  - `usage / quota` as a gauge never fills, because the denominator runs away from the numerator.
+ *    Ripple showed "2 MB / 10.74 GB" over a library holding 1.78 GB for exactly this reason.
+ *  - `quota - usage < floor` never fires, so nothing can ever detect pressure. That is what left four
+ *    of ripple's eviction tests failing for months against a condition that could not occur.
+ *
+ * So the behaviour picked here is FIREFOX'S: a ceiling, and a ceiling does not rise because you put
+ * something under it. It is implemented as the lowest quota seen for this origin, which needs no
+ * probe and no user agent sniffing, and it is TRUE in the strong sense: the platform really did say
+ * the origin could hold this much, and nothing here invents a number the platform never stated.
+ *
+ * The cost is deliberate and is in the safe direction. On Chromium, once some bytes are written, the
+ * reported headroom is smaller than what could really be written, so a caller reclaims cache
+ * slightly early. Cache is the thing that can be fetched again; a caller that never reclaims because
+ * it never sees pressure is the failure this replaces.
+ *
+ * In memory, and per page. Persisting it would mean owning storage to describe storage, and a reload
+ * re-anchors on a figure the platform stated at that moment, which is the same guarantee.
+ */
+let narrowest: number | undefined
+
+const ceiling = (reported: number | undefined, usage: number | undefined): number | undefined => {
+  if (reported === undefined) return undefined
+  narrowest = narrowest === undefined ? reported : Math.min(narrowest, reported)
+  // never below what is already stored, or `quota - usage` goes negative and every caller's
+  // arithmetic goes with it. At worst the headroom reads zero, which is the honest answer for an
+  // origin holding more than the ceiling it was first offered.
+  return Math.max(narrowest, usage ?? 0)
+}
+
 export const storage = {
   /**
    * Same name and same shape as the platform's, with `usage` MEASURED rather than reported.
@@ -168,7 +207,8 @@ export const storage = {
         .then((directory) => walkBytes(directory as unknown as WalkableDirectory))
         .catch(() => null)
       : null
-    return { ...estimate, usage: reconcile(estimate, walked) }
+    const usage = reconcile(estimate, walked)
+    return { ...estimate, usage, quota: ceiling(estimate.quota, usage) }
   },
 
   persist: (): Promise<boolean> =>
